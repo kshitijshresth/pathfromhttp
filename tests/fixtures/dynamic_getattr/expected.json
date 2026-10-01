@@ -1,0 +1,1 @@
+{"target": "helpers.vuln", "entry_points": ["app.index"], "verdict": "UNKNOWN", "path": null}

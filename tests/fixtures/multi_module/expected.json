@@ -1,0 +1,1 @@
+{"target": "util.vuln", "entry_points": ["app.index"], "verdict": "REACHABLE", "path": ["app.index", "helpers.process", "util.vuln"]}

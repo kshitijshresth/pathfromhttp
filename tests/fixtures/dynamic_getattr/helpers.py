@@ -1,0 +1,2 @@
+def vuln():
+    return "boom"
