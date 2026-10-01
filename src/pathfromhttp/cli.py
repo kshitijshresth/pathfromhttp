@@ -1,5 +1,9 @@
 import argparse
+import json
 import sys
+from pathlib import Path
+
+from pathfromhttp.entrypoints import find_entry_points
 
 
 def main(argv=None):
@@ -11,7 +15,12 @@ def main(argv=None):
     c = sub.add_parser("check", help="check if a target function is reachable")
     c.add_argument("repo")
     c.add_argument("--target", required=True)
-    p.parse_args(argv)
+    e = sub.add_parser("entrypoints", help="list detected HTTP entry points")
+    e.add_argument("repo")
+    args = p.parse_args(argv)
+    if args.cmd == "entrypoints":
+        print(json.dumps(find_entry_points(Path(args.repo)), indent=2))
+        return 0
     print("not implemented yet", file=sys.stderr)
     return 2
 
