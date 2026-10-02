@@ -7,14 +7,14 @@ from pathfromhttp.callgraph import build_call_graph
 from pathfromhttp.entrypoints import find_entry_points
 from pathfromhttp.reach import TargetError, check_reachability, render_text
 
-EXIT_CODES = {"NOT_REACHABLE": 0, "REACHABLE": 1, "UNKNOWN": 2}
+EXIT_CODES = {"NOT_REACHABLE": 0, "REACHABLE": 1, "LIKELY_REACHABLE": 1, "UNKNOWN": 2}
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="pathfromhttp",
         description="Can this code be reached from an external HTTP endpoint?",
-        epilog="exit codes for check: 0 NOT_REACHABLE, 1 REACHABLE, 2 UNKNOWN, 3 error",
+        epilog="exit codes for check: 0 NOT_REACHABLE, 1 REACHABLE or LIKELY_REACHABLE, 2 UNKNOWN, 3 error",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check", help="check if a target function is reachable")

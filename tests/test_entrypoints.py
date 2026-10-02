@@ -1,4 +1,5 @@
 import json
+import warnings
 from pathlib import Path
 
 import pytest
@@ -7,20 +8,16 @@ from pathfromhttp.entrypoints import find_entry_points
 
 FIXTURES = Path(__file__).parent / "fixtures"
 DIRS = sorted(p for p in FIXTURES.iterdir() if p.is_dir())
-
-
 @pytest.mark.parametrize("fixture", DIRS, ids=lambda p: p.name)
 def test_fixture_entry_points(fixture):
     exp = json.loads((fixture / "expected.json").read_text())
     assert find_entry_points(fixture) == sorted(exp["entry_points"])
-
 
 def write(tmp_path, rel, text):
     f = tmp_path / rel
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(text)
     return f
-
 
 def test_add_url_rule(tmp_path):
     write(tmp_path, "app.py", (
@@ -42,8 +39,7 @@ def test_method_decorators_and_hooks(tmp_path):
         "@app.before_request\ndef pre():\n    return None\n"
         "@app.errorhandler(404)\ndef nf(e):\n    return 1\n"
     ))
-    assert find_entry_points(tmp_path) == ["app.a", "app.pre"]
-
+    assert find_entry_points(tmp_path) == ["app.a", "app.nf", "app.pre"]
 
 def test_plain_functions_not_detected(tmp_path):
     write(tmp_path, "app.py", "def f():\n    return 1\n\nclass C:\n    def g(self):\n        return 2\n")
@@ -66,3 +62,78 @@ def test_package_module_name_and_skip_dirs(tmp_path):
 def test_syntax_error_file_skipped(tmp_path):
     write(tmp_path, "bad.py", "def (:\n")
     assert find_entry_points(tmp_path) == []
+
+
+def test_class_based_route_decorator(tmp_path):
+    write(tmp_path, "app.py", (
+        "from flask_restx import Namespace, Resource\n"
+        "ns = Namespace('x')\n"
+        "@ns.route('/x')\n"
+        "class Res(Resource):\n"
+        "    def get(self): return 1\n"
+        "    def post(self): return 2\n"
+        "    def helper(self): return 3\n"
+    ))
+    assert find_entry_points(tmp_path) == ["app.Res.get", "app.Res.post"]
+
+
+def test_add_resource(tmp_path):
+    write(tmp_path, "app.py", (
+        "class Res:\n"
+        "    def get(self): return 1\n"
+        "    def put(self): return 2\n"
+        "    def helper(self): return 3\n"
+        "api.add_resource(Res, '/r')\n"
+    ))
+    assert find_entry_points(tmp_path) == ["app.Res.get", "app.Res.put"]
+
+
+def test_as_view(tmp_path):
+    write(tmp_path, "app.py", (
+        "from flask.views import MethodView\n"
+        "class V(MethodView):\n"
+        "    def get(self): return 1\n"
+        "app.add_url_rule('/v', view_func=V.as_view('v'))\n"
+    ))
+    assert find_entry_points(tmp_path) == ["app.V.get"]
+
+
+def test_call_style_hook_registration(tmp_path):
+    write(tmp_path, "app.py", (
+        "def close_db(): return 1\n"
+        "def nf(): return 2\n"
+        "def helper(): return 3\n"
+        "app.teardown_appcontext(close_db)\n"
+        "app.register_error_handler(404, nf)\n"
+    ))
+    assert find_entry_points(tmp_path) == ["app.close_db", "app.nf"]
+
+
+def test_hook_decorator_on_imported_blueprint(tmp_path):
+    write(tmp_path, "other.py", "bp = Blueprint('b', __name__)\n")
+    write(tmp_path, "app.py", (
+        "from other import bp\n"
+        "@bp.before_app_request\ndef f(): return 1\n"
+    ))
+    assert find_entry_points(tmp_path) == ["app.f"]
+
+
+def test_test_code_is_skipped(tmp_path):
+    code = (
+        "from flask import Flask\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/x')\ndef index(): return 1\n"
+    )
+    write(tmp_path, "tests/x.py", code)
+    write(tmp_path, "test_a.py", code)
+    write(tmp_path, "a_test.py", code)
+    write(tmp_path, "conftest.py", code)
+    write(tmp_path, "real.py", code)
+    assert find_entry_points(tmp_path) == ["real.index"]
+
+
+def test_no_syntax_warning_for_invalid_escape(tmp_path):
+    write(tmp_path, "app.py", "x = '\\s'\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert find_entry_points(tmp_path) == []

@@ -3,7 +3,7 @@ import builtins
 from collections import defaultdict
 from pathlib import Path
 
-from pathfromhttp.entrypoints import iter_py_files, module_name
+from pathfromhttp.entrypoints import iter_py_files, module_name, parse_source
 
 BUILTIN_NAMES = set(dir(builtins))
 BUILTIN_METHODS = set()
@@ -19,6 +19,7 @@ class CallGraph:
         self.edges = {}
         self.unresolved = {}
         self.ambiguous = {}
+        self.approx = {}
 
     def to_dict(self):
         def calls(d):
@@ -32,6 +33,7 @@ class CallGraph:
             "edges": {k: sorted(v) for k, v in sorted(self.edges.items())},
             "unresolved": calls(self.unresolved),
             "ambiguous": calls(self.ambiguous),
+            "approx_edges": {k: sorted(v) for k, v in sorted(self.approx.items()) if v},
         }
 
 
@@ -55,19 +57,23 @@ class _ModuleInfo:
         self.classes = {}
         self.env_cache = None
         self.inst_cache = None
+        self.ext_vars = None
 
 
 class _Ctx:
-    def __init__(self, mod, cq, first):
+    def __init__(self, mod, cq, first, q):
         self.mod = mod
         self.cq = cq
         self.first = first
+        self.q = q
         self.locals = set()
         self.nested = set()
         self.types = defaultdict(set)
         self.edges = set()
+        self.approx = set()
         self.unresolved = []
         self.ambiguous = []
+        self.decorator_param = None
 
 
 def _flatten(n):
@@ -92,14 +98,17 @@ class _Builder:
         self.mods = {}
         self.classes = {}
         self.all_names = set()
+        self.all_methods = set()
         self.subs = None
         self.graph = CallGraph()
+        self.decorator_map = defaultdict(set)
+        self.decorator_params = defaultdict(set)
 
     def load(self):
         for py in iter_py_files(self.root):
             try:
-                tree = ast.parse(py.read_text(encoding="utf-8"))
-            except (SyntaxError, UnicodeDecodeError):
+                tree = parse_source(py)
+            except (SyntaxError, UnicodeDecodeError, ValueError):
                 continue
             name = module_name(self.root, py)
             if not name:
@@ -115,6 +124,7 @@ class _Builder:
                     for m in n.body:
                         if isinstance(m, FUNC_NODES):
                             ci.methods[m.name] = f"{ci.qname}.{m.name}"
+                            self.all_methods.add(m.name)
                             self.all_names.add(m.name)
                     mi.classes[n.name] = ci
                     self.classes[ci.qname] = ci
@@ -125,7 +135,7 @@ class _Builder:
         return m in self.mods or any(k.startswith(m + ".") for k in self.mods)
 
     def mod_entry(self, m):
-        return ("module", m) if self.is_proj_prefix(m) else ("external", m)
+        return ("module", m) if self.is_proj_prefix(m) else ("external_module", m)
 
     def from_base(self, mi, n):
         if n.level == 0:
@@ -165,8 +175,14 @@ class _Builder:
                                 env.setdefault(k, ("func", q))
                             for k, ci in bm.classes.items():
                                 env.setdefault(k, ("class", ci.qname))
+                            for k, v in self.ext_vars(base).items():
+                                env.setdefault(k, ("extvar", True))
                         continue
-                    env[a.asname or a.name] = self.import_from_entry(base, a.name)
+                    entry = self.import_from_entry(base, a.name)
+                    if entry:
+                        env[a.asname or a.name] = entry
+                    else:
+                        env[a.asname or a.name] = ("external", base if base else a.name)
         return env
 
     def import_from_entry(self, base, name):
@@ -186,7 +202,46 @@ class _Builder:
         inst = self.instances(mod).get(name)
         if inst:
             return ("instance", frozenset(inst))
+        ev = self.ext_vars(mod).get(name)
+        if ev:
+            return ("extvar", ev)
+        e = self.env(mod).get(name)
+        if e and e[0] == "extvar":
+            return ("extvar", True)
         return self.env(mod).get(name)
+
+    def ext_vars(self, mod):
+        mi = self.mods[mod]
+        if mi.ext_vars is not None:
+            return mi.ext_vars
+        mi.ext_vars = ev = {}
+        for n in mi.tree.body:
+            if (
+                isinstance(n, ast.Assign)
+                and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Name)
+                and isinstance(n.value, ast.Call)
+            ):
+                fn = n.value.func
+                is_external = False
+                if isinstance(fn, ast.Name):
+                    if fn.id in mi.funcs or fn.id in mi.classes:
+                        continue
+                    e = self.env(mod).get(fn.id)
+                    if e and e[0] in ("external", "external_module"):
+                        is_external = True
+                elif isinstance(fn, ast.Attribute):
+                    chain = _flatten(fn)
+                    if chain is None:
+                        continue
+                    if chain[0] in mi.funcs or chain[0] in mi.classes:
+                        continue
+                    e = self.dotted(mod, chain) if chain else None
+                    if e and e[0] in ("external", "external_module"):
+                        is_external = True
+                if is_external:
+                    ev[n.targets[0].id] = True
+        return ev
 
     def instances(self, mod):
         mi = self.mods[mod]
@@ -214,6 +269,9 @@ class _Builder:
         inst = self.instances(mod).get(name)
         if inst:
             return ("instance", frozenset(inst))
+        ev = self.ext_vars(mod).get(name)
+        if ev:
+            return ("extvar", True)
         return self.env(mod).get(name)
 
     def descend(self, m, rest):
@@ -225,7 +283,7 @@ class _Builder:
 
     def dotted(self, mod, chain):
         head = self.lookup(mod, chain[0])
-        if head is None or head[0] != "module" or len(chain) < 2:
+        if head is None or head[0] not in ("module", "external_module") or len(chain) < 2:
             return None
         m, rest = self.descend(head[1], chain[1:])
         if m not in self.mods:
@@ -238,6 +296,8 @@ class _Builder:
                 return ("method", first[1], rest[1])
             if first and first[0] == "instance":
                 return ("imethod", first[1], rest[1])
+            if first and first[0] == "extvar":
+                return ("extvar_method", rest[1])
             return ("missing", rest[0])
         return None
 
@@ -292,20 +352,62 @@ class _Builder:
                     todo.append(d)
         return out
 
-    def method_targets(self, cq, name):
-        q, ext = self.lookup_method(cq, name, set())
-        targets = {q} if q else set()
-        for d in self.descendants(cq):
-            if name in self.classes[d].methods:
-                targets.add(self.classes[d].methods[name])
-        if targets:
-            return targets, "ok"
-        return targets, ("ext" if ext else "missing")
+    def method_targets(self, cq, name, include_self=True):
+        if include_self:
+            q, ext = self.lookup_method(cq, name, set())
+            targets = {q} if q else set()
+            for d in self.descendants(cq):
+                if name in self.classes[d].methods:
+                    targets.add(self.classes[d].methods[name])
+            if targets:
+                return targets, "ok"
+            return targets, ("ext" if ext else "missing")
+        else:
+            seen = set()
+            if cq in seen:
+                return set(), False
+            seen.add(cq)
+            ci = self.classes[cq]
+            targets = set()
+            ext = ci.ext_base
+            for b in self.bases(ci):
+                q, e = self.lookup_method(b, name, seen)
+                if q:
+                    targets.add(q)
+                ext = ext or e
+            if targets:
+                return targets, "ok"
+            return targets, ("ext" if ext else "missing")
+
+    def resolve_decorator(self, mod, dec):
+        if isinstance(dec, ast.Name):
+            e = self.lookup(mod, dec.id)
+            if e and e[0] == "func":
+                return e[1]
+        elif isinstance(dec, ast.Call):
+            f = dec.func
+            if isinstance(f, ast.Name):
+                e = self.lookup(mod, f.id)
+                if e and e[0] == "func":
+                    return e[1]
+            elif isinstance(f, ast.Attribute):
+                chain = _flatten(f)
+                if chain:
+                    e = self.dotted(mod, chain)
+                    if e and e[0] == "func":
+                        return e[1]
+        elif isinstance(dec, ast.Attribute):
+            chain = _flatten(dec)
+            if chain:
+                e = self.dotted(mod, chain)
+                if e and e[0] == "func":
+                    return e[1]
+        return None
 
     # ---- per-function analysis ----
 
     def apply_method(self, cq, name, line, text, ctx):
-        targets, status = self.method_targets(cq, name)
+        targets, status = self.method_targets(cq, name, include_self=True)
         ctx.edges |= targets
         if not targets and status == "missing":
             ctx.unresolved.append((line, text))
@@ -335,11 +437,63 @@ class _Builder:
         elif kind == "missing":
             self.unknown(e[1], line, text, ctx)
 
+    def handle_super(self, c, ctx):
+        f = c.func
+        is_super_call = False
+        name = None
+        if isinstance(f, ast.Name) and f.id == "super":
+            is_super_call = True
+        elif isinstance(f, ast.Attribute) and f.attr == "super":
+            is_super_call = True
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Call):
+            inner = f.value
+            if isinstance(inner.func, ast.Name) and inner.func.id == "super":
+                is_super_call = True
+                name = f.attr
+        if not is_super_call:
+            return False
+        if not ctx.cq:
+            return False
+        if not isinstance(f, ast.Attribute):
+            return False
+        name = f.attr
+        ci = self.classes[ctx.cq]
+        line, text = c.lineno, _text(c.func)
+        targets, status = self.method_targets(ctx.cq, name, include_self=False)
+        if targets:
+            ctx.edges |= targets
+            return True
+        if ci.ext_base:
+            return True
+        if not ci.bases and name == "__init__":
+            return True
+        approx_targets = set()
+        for cq, ci in self.classes.items():
+            if cq != ctx.cq and name in ci.methods:
+                approx_targets.add(ci.methods[name])
+        if approx_targets:
+            ctx.approx |= approx_targets
+        return True
+
     def call(self, c, ctx):
         f = c.func
         line, text = c.lineno, _text(c.func)
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Call):
+            inner = f.value
+            if isinstance(inner.func, ast.Name) and inner.func.id == "super":
+                if self.handle_super(c, ctx):
+                    return
+        if self.handle_super(c, ctx):
+            return
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Call):
+            inner = f.value
+            if isinstance(inner.func, ast.Name) and inner.func.id == "super":
+                return
         if isinstance(f, ast.Name):
             name = f.id
+            if ctx.q in self.decorator_params and name in self.decorator_params[ctx.q]:
+                ctx.edges |= self.decorator_map[ctx.q]
+                return
             if name in ctx.locals:
                 if name not in ctx.nested:
                     ctx.unresolved.append((line, text))
@@ -349,29 +503,50 @@ class _Builder:
                 if name not in BUILTIN_NAMES:
                     self.unknown(name, line, text, ctx)
                 return
+            kind = e[0]
+            if kind == "external":
+                return
+            if kind == "external_module":
+                return
+            if kind == "extvar":
+                return
             self.apply_entry(e, name, line, text, ctx)
             return
         if not isinstance(f, ast.Attribute):
+            if isinstance(f, ast.Call):
+                inner = f.func
+                e = None
+                if isinstance(inner, ast.Name):
+                    e = self.lookup(ctx.mod, inner.id)
+                elif isinstance(inner, ast.Attribute):
+                    chain = _flatten(inner)
+                    if chain:
+                        e = self.dotted(ctx.mod, chain)
+                if e and e[0] == "func":
+                    return
             ctx.unresolved.append((line, text))
             return
         chain = _flatten(f)
         attr = f.attr
         if chain is None or len(chain) < 2:
-            self.unknown(attr, line, text, ctx)
+            self.add_approx(attr, line, text, ctx)
             return
         head = chain[0]
         if ctx.first and ctx.cq and head == ctx.first and len(chain) == 2:
             self.apply_method(ctx.cq, attr, line, text, ctx)
             return
+        if ctx.q in self.decorator_params and head in self.decorator_params[ctx.q] and len(chain) == 2:
+            ctx.edges |= self.decorator_map[ctx.q]
+            return
         if head in ctx.locals:
             if len(chain) == 2:
                 for t in ctx.types.get(head) or {None}:
                     if t is None:
-                        self.unknown(attr, line, text, ctx)
+                        self.add_approx(attr, line, text, ctx)
                     else:
                         self.apply_method(t, attr, line, text, ctx)
             else:
-                self.unknown(attr, line, text, ctx)
+                self.add_approx(attr, line, text, ctx)
             return
         e = self.lookup(ctx.mod, head)
         if e is None:
@@ -380,6 +555,11 @@ class _Builder:
             return
         kind = e[0]
         if kind == "external":
+            self.add_approx(attr, line, text, ctx)
+            return
+        if kind == "external_module":
+            return
+        if kind == "extvar":
             return
         if kind == "class" and len(chain) == 2:
             self.apply_method(e[1], attr, line, text, ctx)
@@ -389,18 +569,35 @@ class _Builder:
         elif kind == "module":
             ent = self.dotted(ctx.mod, chain)
             if ent is None:
-                self.unknown(attr, line, text, ctx)
+                self.add_approx(attr, line, text, ctx)
+            elif ent[0] == "external":
+                return
             elif ent[0] != "external":
                 self.apply_entry(ent, attr, line, text, ctx)
         else:
-            self.unknown(attr, line, text, ctx)
+            self.add_approx(attr, line, text, ctx)
+
+    def add_approx(self, attr, line, text, ctx):
+        if attr not in self.all_methods:
+            if attr in self.all_names:
+                ctx.ambiguous.append((line, text))
+            return
+        if attr in BUILTIN_METHODS:
+            ctx.ambiguous.append((line, text))
+            return
+        targets = set()
+        for cq, ci in self.classes.items():
+            if attr in ci.methods:
+                targets.add(ci.methods[attr])
+        if targets:
+            ctx.approx |= (targets - ctx.edges)
 
     def analyze(self, fq, node, mi, cq, static):
         first = None
         if cq and not static:
             params = node.args.posonlyargs + node.args.args
             first = params[0].arg if params else None
-        ctx = _Ctx(mi.name, cq, first)
+        ctx = _Ctx(mi.name, cq, first, fq)
         typed = set()
         for n in ast.walk(node):
             if isinstance(n, ast.arg):
@@ -460,11 +657,51 @@ class _Builder:
         g = self.graph
         g.functions[fq] = f"{mi.path}:{node.lineno}"
         g.edges[fq] = ctx.edges
+        g.approx[fq] = ctx.approx
         g.unresolved[fq] = ctx.unresolved
         g.ambiguous[fq] = ctx.ambiguous
 
     def run(self):
         self.load()
+        for mi in self.mods.values():
+            for q, node in mi.funcs.values():
+                for dec in node.decorator_list:
+                    d = self.resolve_decorator(mi.name, dec)
+                    if d:
+                        self.decorator_map[d].add(q)
+            for ci in mi.classes.values():
+                for m in ci.node.body:
+                    if not isinstance(m, FUNC_NODES):
+                        continue
+                    for dec in m.decorator_list:
+                        d = self.resolve_decorator(mi.name, dec)
+                        if d:
+                            self.decorator_map[d].add(ci.methods[m.name])
+        for mi in self.mods.values():
+            for q, node in mi.funcs.values():
+                if q in self.decorator_map:
+                    params = node.args.posonlyargs + node.args.args
+                    if params:
+                        self.decorator_params[q].add(params[0].arg)
+                    for n in ast.walk(node):
+                        if isinstance(n, FUNC_NODES) and n is not node:
+                            params = n.args.posonlyargs + n.args.args
+                            if params:
+                                self.decorator_params[q].add(params[0].arg)
+            for ci in mi.classes.values():
+                for m in ci.node.body:
+                    if not isinstance(m, FUNC_NODES):
+                        continue
+                    mq = ci.methods[m.name]
+                    if mq in self.decorator_map:
+                        params = m.args.posonlyargs + m.args.args
+                        if params:
+                            self.decorator_params[mq].add(params[0].arg)
+                        for n in ast.walk(m):
+                            if isinstance(n, FUNC_NODES) and n is not m:
+                                params = n.args.posonlyargs + n.args.args
+                                if params:
+                                    self.decorator_params[mq].add(params[0].arg)
         for mi in self.mods.values():
             for q, node in mi.funcs.values():
                 self.analyze(q, node, mi, None, False)
@@ -477,6 +714,20 @@ class _Builder:
                         for d in m.decorator_list
                     )
                     self.analyze(ci.methods[m.name], m, mi, ci.qname, static)
+        for mi in self.mods.values():
+            for q, node in mi.funcs.values():
+                for dec in node.decorator_list:
+                    d = self.resolve_decorator(mi.name, dec)
+                    if d:
+                        self.graph.edges[q].add(d)
+            for ci in mi.classes.values():
+                for m in ci.node.body:
+                    if not isinstance(m, FUNC_NODES):
+                        continue
+                    for dec in m.decorator_list:
+                        d = self.resolve_decorator(mi.name, dec)
+                        if d:
+                            self.graph.edges[ci.methods[m.name]].add(d)
         return self.graph
 
 

@@ -120,3 +120,65 @@ def test_cli_unknown_exit_code(tmp_path, capsys):
     assert main(["check", str(tmp_path), "--target", "app.vuln"]) == 2
     out = capsys.readouterr().out
     assert "Verdict: UNKNOWN" in out and "Unresolved calls" in out
+
+def test_likely_reachable_via_name_match(tmp_path, capsys):
+    write(tmp_path, {"app.py": HDR + (
+        "class S:\n"
+        "    def process(self): return 1\n"
+        "@app.route('/x')\n"
+        "def index(obj): return obj.process()\n"
+    )})
+    res = check_reachability(tmp_path, "app.S.process")
+    assert res["verdict"] == "LIKELY_REACHABLE"
+    assert res["path"] == ["app.index", "app.S.process"]
+    assert res["approx_hops"] == [["app.index", "app.S.process"]]
+    assert main(["check", str(tmp_path), "--target", "app.S.process"]) == 1
+    out = capsys.readouterr().out
+    assert "~>" in out
+    assert "LIKELY_REACHABLE" in out
+
+def test_precise_path_preferred_over_name_match(tmp_path):
+    write(tmp_path, {"app.py": HDR + (
+        "class S:\n"
+        "    def process(self): return 1\n"
+        "def direct():\n"
+        "    s = S()\n"
+        "    return s.process()\n"
+        "@app.route('/x')\n"
+        "def index(obj):\n"
+        "    obj.process()\n"
+        "    return direct()\n"
+    )})
+    res = check_reachability(tmp_path, "app.S.process")
+    assert res["verdict"] == "REACHABLE"
+    assert res["path"] == ["app.index", "app.direct", "app.S.process"]
+
+def test_non_likely_results_have_empty_approx_hops(tmp_path):
+    write(tmp_path, {"app.py": HDR + (
+        "def vuln(): return 1\n"
+        "@app.route('/x')\n"
+        "def index(): return vuln()\n"
+    )})
+    res = check_reachability(tmp_path, "app.vuln")
+    assert res["verdict"] == "REACHABLE"
+    assert res["approx_hops"] == []
+
+def test_render_marks_destination_of_approx_hop(tmp_path):
+    from pathfromhttp.reach import render_text
+    write(tmp_path, {"app.py": HDR + (
+        "class S:\n"
+        "    def process(self): return 1\n"
+        "def direct(obj): return obj.process()\n"
+        "@app.route('/x')\n"
+        "def index(obj): return direct(obj)\n"
+    )})
+    res = check_reachability(tmp_path, "app.S.process")
+    assert res["verdict"] == "LIKELY_REACHABLE"
+    assert res["path"] == ["app.index", "app.direct", "app.S.process"]
+    lines = render_text(res).split("\n")
+    index_line = [l for l in lines if l.startswith("  ") and "app.index" in l and "Target:" not in l][0]
+    direct_line = [l for l in lines if "app.direct" in l][0]
+    process_line = [l for l in lines if l.startswith("  ") and "app.S.process" in l and "Target:" not in l][0]
+    assert index_line.startswith("  ") and not index_line.startswith("  ->") and not index_line.startswith("  ~>")
+    assert direct_line.startswith("  -> ")
+    assert process_line.startswith("  ~> ")

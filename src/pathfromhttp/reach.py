@@ -46,11 +46,9 @@ def check_reachability(root, target):
                 queue.append(callee)
     visited = set(parent)
 
-    unresolved = _sites(graph, visited, graph.unresolved)
-    ambiguous = _sites(graph, visited, graph.ambiguous)
-
     path = None
     reason = None
+    approx_hops = []
     if tgt in parent:
         verdict = "REACHABLE"
         path = []
@@ -59,17 +57,47 @@ def check_reachability(root, target):
             path.append(cur)
             cur = parent[cur]
         path.reverse()
-    elif not entries:
-        verdict = "UNKNOWN"
-        reason = "no HTTP entry points were detected"
-    elif unresolved:
-        verdict = "UNKNOWN"
-        reason = (
-            f"the search crossed {len(unresolved)} call(s) that could not be resolved"
-        )
     else:
-        verdict = "NOT_REACHABLE"
+        parent2 = {e: None for e in entries}
+        queue = deque(entries)
+        while queue:
+            fn = queue.popleft()
+            for callee in sorted(graph.edges.get(fn, ())):
+                if callee not in parent2:
+                    parent2[callee] = fn
+                    queue.append(callee)
+            for callee in sorted(graph.approx.get(fn, ())):
+                if callee not in parent2:
+                    parent2[callee] = fn
+                    queue.append(callee)
+        visited2 = set(parent2)
+        if tgt in parent2:
+            verdict = "LIKELY_REACHABLE"
+            path = []
+            cur = tgt
+            while cur is not None:
+                path.append(cur)
+                cur = parent2[cur]
+            path.reverse()
+            for i in range(len(path) - 1):
+                if path[i+1] not in graph.edges.get(path[i], set()):
+                    approx_hops.append([path[i], path[i+1]])
+            n = len(approx_hops)
+            reason = f"{n} hop(s) matched by method name only"
+        elif not entries:
+            verdict = "UNKNOWN"
+            reason = "no HTTP entry points were detected"
+        else:
+            unresolved = _sites(graph, visited2, graph.unresolved)
+            if unresolved:
+                verdict = "UNKNOWN"
+                reason = (
+                    f"the search crossed {len(unresolved)} call(s) that could not be resolved"
+                )
+            else:
+                verdict = "NOT_REACHABLE"
 
+    final_visited = visited if verdict == "REACHABLE" else (visited2 if verdict == "LIKELY_REACHABLE" else (visited2 if verdict == "UNKNOWN" else visited))
     return {
         "target": tgt,
         "target_location": graph.functions[tgt],
@@ -78,9 +106,10 @@ def check_reachability(root, target):
         "path": path,
         "path_locations": [graph.functions[p] for p in path] if path else None,
         "entry_points": entries,
-        "functions_searched": len(visited),
-        "unresolved": unresolved,
-        "ambiguous": ambiguous,
+        "functions_searched": len(final_visited),
+        "unresolved": _sites(graph, final_visited, graph.unresolved),
+        "ambiguous": _sites(graph, final_visited, graph.ambiguous),
+        "approx_hops": approx_hops,
     }
 
 
@@ -92,14 +121,23 @@ def render_text(result):
     if result["path"]:
         lines.append("Path:")
         for i, (q, loc) in enumerate(zip(result["path"], result["path_locations"])):
-            prefix = "  " if i == 0 else "  -> "
+            if i == 0:
+                prefix = "  "
+            else:
+                prev = result["path"][i-1]
+                if [prev, q] in result["approx_hops"]:
+                    prefix = "  ~> "
+                else:
+                    prefix = "  -> "
             lines.append(f"{prefix}{q} ({loc})")
+        if result["approx_hops"]:
+            lines.append("  (~> means matched by method name only)")
     else:
         lines.append(
             f"Searched {result['functions_searched']} function(s) reachable from "
             f"{len(result['entry_points'])} entry point(s)."
         )
-    if result["verdict"] != "REACHABLE":
+    if result["verdict"] not in ("REACHABLE", "LIKELY_REACHABLE"):
         if result["unresolved"]:
             lines.append("Unresolved calls on the searched paths:")
             for u in result["unresolved"]:

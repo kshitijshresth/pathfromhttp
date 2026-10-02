@@ -147,7 +147,9 @@ def test_unknown_receiver_flagged_only_when_name_is_project_defined(tmp_path):
         "def f(obj):\n    return obj.process()\n"
         "def h(obj):\n    return obj.something_else()\n"
     )})
-    assert len(g.unresolved["a.f"]) == 1
+    assert g.approx["a.f"] == {"a.S.process"}
+    assert not g.unresolved["a.f"]
+    assert not g.approx["a.h"]
     assert not g.unresolved["a.h"]
 
 def test_builtin_method_name_collision_is_ambiguous_not_unresolved(tmp_path):
@@ -188,3 +190,150 @@ def test_to_dict_is_json_serialisable(tmp_path):
     import json
     g = write(tmp_path, {"a.py": "def f():\n    return 1\n"})
     json.dumps(g.to_dict())
+
+def test_super_call_resolves_to_base(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "class Base:\n"
+        "    def __init__(self):\n        return None\n"
+        "class Child(Base):\n"
+        "    def __init__(self):\n        super().__init__()\n"
+    )})
+    assert g.edges["a.Child.__init__"] == {"a.Base.__init__"}
+
+def test_super_with_external_base_is_ignored(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "from lib import Thing\n"
+        "class C(Thing):\n"
+        "    def __init__(self):\n        super().__init__()\n"
+    )})
+    assert g.edges.get("a.C.__init__", set()) == set()
+    assert g.approx.get("a.C.__init__", set()) == set()
+    assert not g.unresolved.get("a.C.__init__", [])
+
+def test_super_in_mixin_uses_name_match(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "class Mixin:\n"
+        "    def save(self):\n        return super().save()\n"
+        "class Model:\n"
+        "    def save(self):\n        return 1\n"
+    )})
+    assert "a.Model.save" in g.approx["a.Mixin.save"]
+
+def test_external_module_variable_is_ignored_even_when_imported(tmp_path):
+    g = write(tmp_path, {
+        "ext.py": "from lib import Thing\ndb = Thing()\n",
+        "cfg.py": "class Config:\n    def init_app(self, app): return None\n",
+        "a.py": "from ext import db\ndef f(): return db.init_app(1)\n",
+    })
+    assert g.edges.get("a.f", set()) == set()
+    assert g.approx.get("a.f", set()) == set()
+    assert not g.unresolved.get("a.f", [])
+
+def test_method_on_imported_external_name_gets_name_matched_edge(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "from flask_login import current_user\n"
+        "class User:\n"
+        "    def follow(self, other): return 1\n"
+        "def f(): return current_user.follow(1)\n"
+    )})
+    assert g.approx["a.f"] == {"a.User.follow"}
+
+def test_decorator_edges_and_wrapper_call_resolved(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "def login_required(view):\n"
+        "    def wrapped(**kw): return view(**kw)\n"
+        "    return wrapped\n"
+        "@login_required\n"
+        "def create(): return 1\n"
+    )})
+    assert g.edges["a.create"] == {"a.login_required"}
+    assert g.edges["a.login_required"] == {"a.create"}
+    assert not g.unresolved.get("a.login_required", [])
+
+def test_decorator_factory_call_of_call_is_resolved(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "def requires(role):\n"
+        "    def deco(f):\n"
+        "        def wrapper(*a): return f(*a)\n"
+        "        return wrapper\n"
+        "    return deco\n"
+        "def admin_required(f): return requires('admin')(f)\n"
+        "@requires('x')\n"
+        "def view(): return 1\n"
+    )})
+    assert not g.unresolved.get("a.admin_required", [])
+    assert "a.requires" in g.edges.get("a.admin_required", set())
+
+def test_to_dict_includes_approx_edges(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "class S:\n"
+        "    def process(self): return 1\n"
+        "def f(obj): return obj.process()\n"
+    )})
+    assert g.to_dict()["approx_edges"] == {"a.f": ["a.S.process"]}
+
+def test_module_level_chained_call_does_not_crash(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "import logging\n"
+        "log = logging.getLogger('x').getChild('y')\n"
+        "def h(): return 1\n"
+        "def f(): return log.info('x') or h()\n"
+    )})
+    assert g.edges["a.f"] == {"a.h"}
+
+def test_super_with_args_on_non_init_method(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "class Base:\n"
+        "    def __init__(self): return None\n"
+        "    def save(self): return None\n"
+        "class Child(Base):\n"
+        "    def save(self): return super(Child, self).save()\n"
+    )})
+    assert g.edges["a.Child.save"] == {"a.Base.save"}
+
+def test_call_of_call_with_external_inner_is_unresolved(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "import lib\n"
+        "def f(): return lib.get_handler()()\n"
+    )})
+    assert len(g.unresolved["a.f"]) == 1
+
+def test_receiver_that_is_a_call_result_gets_approx_edge(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "class S:\n"
+        "    def process(self): return 1\n"
+        "def f(x): return x.make().process()\n"
+    )})
+    assert g.approx["a.f"] == {"a.S.process"}
+    assert not g.unresolved["a.f"]
+
+def test_receiver_that_is_a_subscript_gets_approx_edge(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "class S:\n"
+        "    def process(self): return 1\n"
+        "def f(table): return table['k'].process()\n"
+    )})
+    assert g.approx["a.f"] == {"a.S.process"}
+    assert not g.unresolved["a.f"]
+
+def test_attribute_base_on_external_variable_is_external(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "from lib import Thing\n"
+        "db = Thing()\n"
+        "class M(db.Model):\n"
+        "    def f(self): return self.anything()\n"
+    )})
+    assert not g.unresolved["a.M.f"]
+
+def test_nested_decorator_param_resolved(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "def requires(role):\n"
+        "    def deco(f):\n"
+        "        def wrapper(*a): return f(*a)\n"
+        "        return wrapper\n"
+        "    return deco\n"
+        "@requires('x')\n"
+        "def view(): return 1\n"
+    )})
+    assert not g.unresolved["a.requires"]
+    assert "a.view" in g.edges["a.requires"]
