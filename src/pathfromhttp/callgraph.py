@@ -20,6 +20,8 @@ class CallGraph:
         self.unresolved = {}
         self.ambiguous = {}
         self.approx = {}
+        self.extra_entries = set()
+        self.skipped_files = []
 
     def to_dict(self):
         def calls(d):
@@ -34,6 +36,8 @@ class CallGraph:
             "unresolved": calls(self.unresolved),
             "ambiguous": calls(self.ambiguous),
             "approx_edges": {k: sorted(v) for k, v in sorted(self.approx.items()) if v},
+            "extra_entry_points": sorted(self.extra_entries),
+            "skipped_files": self.skipped_files,
         }
 
 
@@ -109,6 +113,8 @@ class _Builder:
             try:
                 tree = parse_source(py)
             except (SyntaxError, UnicodeDecodeError, ValueError):
+                rel = py.relative_to(self.root).as_posix()
+                self.graph.skipped_files.append(rel)
                 continue
             name = module_name(self.root, py)
             if not name:
@@ -130,6 +136,7 @@ class _Builder:
                     self.classes[ci.qname] = ci
                     self.all_names.add(n.name)
             self.mods[name] = mi
+        self.graph.skipped_files.sort()
 
     def is_proj_prefix(self, m):
         return m in self.mods or any(k.startswith(m + ".") for k in self.mods)
@@ -728,7 +735,112 @@ class _Builder:
                         d = self.resolve_decorator(mi.name, dec)
                         if d:
                             self.graph.edges[ci.methods[m.name]].add(d)
+        self._collect_dependency_entries()
+        self._collect_route_entries()
         return self.graph
+
+    def _get_dependency_arg(self, call):
+        for kw in call.keywords:
+            if kw.arg == "dependency":
+                return kw.value
+        if call.args:
+            arg = call.args[0]
+            if isinstance(arg, ast.Call):
+                f = arg.func
+                if isinstance(f, ast.Name) and f.id in ("Depends", "Security"):
+                    if arg.args:
+                        return arg.args[0]
+                elif isinstance(f, ast.Attribute) and f.attr in ("Depends", "Security"):
+                    if arg.args:
+                        return arg.args[0]
+            return arg
+        return None
+
+    def _get_endpoint_arg(self, call):
+        for kw in call.keywords:
+            if kw.arg == "endpoint":
+                return kw.value
+        if len(call.args) >= 2:
+            return call.args[1]
+        return None
+
+    def _resolve_dependency_target(self, mod, node):
+        if isinstance(node, ast.Name):
+            e = self.lookup(mod, node.id)
+        elif isinstance(node, ast.Attribute):
+            chain = _flatten(node)
+            if chain:
+                e = self.dotted(mod, chain)
+            else:
+                e = None
+        else:
+            e = None
+        if e is None:
+            return None
+        kind = e[0]
+        if kind == "func":
+            return {e[1]}
+        if kind == "class":
+            targets, _ = self.method_targets(e[1], "__init__")
+            return targets
+        if kind == "instance":
+            out = set()
+            for cq in e[1]:
+                out |= self.method_targets(cq, "__call__")[0]
+            return out
+        if kind == "method":
+            targets, _ = self.method_targets(e[1], e[2])
+            return targets
+        if kind == "imethod":
+            out = set()
+            for cq in e[1]:
+                out |= self.method_targets(cq, e[2])[0]
+            return out
+        return None
+
+    def _collect_dependency_entries(self):
+        for mi in self.mods.values():
+            for node in ast.walk(mi.tree):
+                if isinstance(node, ast.Call):
+                    f = node.func
+                    is_depends = False
+                    if isinstance(f, ast.Name) and f.id in ("Depends", "Security"):
+                        is_depends = True
+                    elif isinstance(f, ast.Attribute) and f.attr in ("Depends", "Security"):
+                        is_depends = True
+                    if is_depends:
+                        arg = self._get_dependency_arg(node)
+                        if arg is None:
+                            continue
+                        targets = self._resolve_dependency_target(mi.name, arg)
+                        if targets:
+                            for t in targets:
+                                if t in self.graph.functions:
+                                    self.graph.extra_entries.add(t)
+
+    def _collect_route_entries(self):
+        route_attrs = {"add_api_route", "add_api_websocket_route", "add_websocket_route", "add_route"}
+        route_constructors = {"APIRoute", "APIWebSocketRoute", "Route", "WebSocketRoute"}
+        for mi in self.mods.values():
+            for node in ast.walk(mi.tree):
+                if isinstance(node, ast.Call):
+                    f = node.func
+                    is_route = False
+                    if isinstance(f, ast.Attribute) and f.attr in route_attrs:
+                        is_route = True
+                    elif isinstance(f, ast.Name) and f.id in route_constructors:
+                        is_route = True
+                    elif isinstance(f, ast.Attribute) and f.attr in route_constructors:
+                        is_route = True
+                    if is_route:
+                        arg = self._get_endpoint_arg(node)
+                        if arg is None:
+                            continue
+                        targets = self._resolve_dependency_target(mi.name, arg)
+                        if targets:
+                            for t in targets:
+                                if t in self.graph.functions:
+                                    self.graph.extra_entries.add(t)
 
 
 def build_call_graph(root):

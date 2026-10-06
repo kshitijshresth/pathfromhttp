@@ -1,0 +1,1 @@
+{"target": "main.clamp", "entry_points": ["main.Pagination.__init__", "main.items"], "verdict": "REACHABLE", "path": ["main.Pagination.__init__", "main.clamp"]}

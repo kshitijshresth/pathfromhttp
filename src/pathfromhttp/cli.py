@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pathfromhttp.callgraph import build_call_graph
 from pathfromhttp.entrypoints import find_entry_points
-from pathfromhttp.reach import TargetError, check_reachability, render_text
+from pathfromhttp.reach import TargetError, check_reachability, collect_entry_points, render_text
 
 EXIT_CODES = {"NOT_REACHABLE": 0, "REACHABLE": 1, "LIKELY_REACHABLE": 1, "UNKNOWN": 2}
 
@@ -32,7 +32,9 @@ def main(argv=None):
         print(f"error: not a directory: {args.repo}", file=sys.stderr)
         return 3
     if args.cmd == "entrypoints":
-        print(json.dumps(find_entry_points(root), indent=2))
+        graph = build_call_graph(root)
+        entries = collect_entry_points(root, graph)
+        print(json.dumps(entries, indent=2))
         return 0
     if args.cmd == "callgraph":
         print(json.dumps(build_call_graph(root).to_dict(), indent=2))

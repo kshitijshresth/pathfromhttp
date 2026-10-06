@@ -1,0 +1,1 @@
+{"target": "main.audit", "entry_points": ["main.mw"], "verdict": "REACHABLE", "path": ["main.mw", "main.audit"]}

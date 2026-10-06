@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from pathfromhttp.cli import main
-from pathfromhttp.reach import TargetError, check_reachability
+from pathfromhttp.reach import TargetError, check_reachability, collect_entry_points
 
 FIXTURES = Path(__file__).parent / "fixtures"
 DIRS = sorted(p for p in FIXTURES.iterdir() if p.is_dir())
@@ -182,3 +182,36 @@ def test_render_marks_destination_of_approx_hop(tmp_path):
     assert index_line.startswith("  ") and not index_line.startswith("  ->") and not index_line.startswith("  ~>")
     assert direct_line.startswith("  -> ")
     assert process_line.startswith("  ~> ")
+
+def test_unparseable_file_blocks_not_reachable(tmp_path):
+    write(tmp_path, {"app.py": HDR + (
+        "def vuln(): return 1\n"
+        "@app.route('/x')\n"
+        "def index(): return 'ok'\n"
+    ), "bad.py": "def (:\n"})
+    res = check_reachability(tmp_path, "app.vuln")
+    assert res["verdict"] == "UNKNOWN"
+    assert "could not be parsed" in res["reason"]
+    assert res["skipped_files"] == ["bad.py"]
+
+def test_unparseable_file_does_not_change_reachable(tmp_path):
+    write(tmp_path, {"app.py": HDR + (
+        "def vuln(): return 1\n"
+        "@app.route('/x')\n"
+        "def index(): return vuln()\n"
+    ), "bad.py": "def (:\n"})
+    res = check_reachability(tmp_path, "app.vuln")
+    assert res["verdict"] == "REACHABLE"
+    assert res["skipped_files"] == ["bad.py"]
+
+def test_entrypoints_command_includes_dependency_entries(tmp_path, capsys):
+    write(tmp_path, {"app.py": (
+        "from fastapi import Depends, FastAPI\n"
+        "app = FastAPI()\n"
+        "def dep(): return 1\n"
+        "@app.get('/x')\n"
+        "def v(d=Depends(dep)): return d\n"
+    )})
+    assert main(["entrypoints", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert json.loads(out) == ["app.dep", "app.v"]

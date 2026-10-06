@@ -337,3 +337,86 @@ def test_nested_decorator_param_resolved(tmp_path):
     )})
     assert not g.unresolved["a.requires"]
     assert "a.view" in g.edges["a.requires"]
+
+def test_depends_function_becomes_extra_entry(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "from fastapi import Depends\n"
+        "def dep(): return 1\n"
+        "def view(x=Depends(dep)): return x\n"
+    )})
+    assert g.extra_entries == {"a.dep"}
+
+def test_security_and_keyword_dependency(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "from fastapi import Depends, Security\n"
+        "def d1(): return 1\n"
+        "def d2(): return 1\n"
+        "def v(a=Security(d1), b=Depends(dependency=d2)): return 1\n"
+    )})
+    assert g.extra_entries == {"a.d1", "a.d2"}
+
+def test_dotted_dependency_reference(tmp_path):
+    g = write(tmp_path, {
+        "deps.py": "def get_user(): return 1\n",
+        "a.py": "import deps\nfrom fastapi import Depends\ndef v(u=Depends(deps.get_user)): return u\n"
+    })
+    assert g.extra_entries == {"deps.get_user"}
+
+def test_dependency_class_gives_init(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "from fastapi import Depends\n"
+        "class P:\n"
+        "    def __init__(self): return None\n"
+        "def v(p=Depends(P)): return p\n"
+    )})
+    assert g.extra_entries == {"a.P.__init__"}
+
+def test_dependency_instance_gives_call(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "from fastapi import Depends\n"
+        "class C:\n"
+        "    def __call__(self): return 1\n"
+        "chk = C()\n"
+        "def v(x=Depends(chk)): return x\n"
+    )})
+    assert g.extra_entries == {"a.C.__call__"}
+
+def test_dependency_on_external_object_or_empty_is_ignored(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "from fastapi import Depends\n"
+        "from lib import Bearer\n"
+        "bearer = Bearer()\n"
+        "def v(a=Depends(bearer), b=Depends()): return 1\n"
+    )})
+    assert g.extra_entries == set()
+
+def test_depends_inside_annotated_alias(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "from typing import Annotated\n"
+        "from fastapi import Depends\n"
+        "def get_db(): return 1\n"
+        "DbDep = Annotated[object, Depends(get_db)]\n"
+    )})
+    assert g.extra_entries == {"a.get_db"}
+
+def test_add_api_route_and_route_constructors(tmp_path):
+    g = write(tmp_path, {"a.py": (
+        "from fastapi import FastAPI\n"
+        "from fastapi.routing import APIRoute\n"
+        "app = FastAPI()\n"
+        "def h1(): return 1\n"
+        "def h2(): return 1\n"
+        "def h3(): return 1\n"
+        "app.add_api_route('/a', h1)\n"
+        "app.add_api_route('/b', endpoint=h2)\n"
+        "routes = [APIRoute('/c', h3)]\n"
+    )})
+    assert g.extra_entries == {"a.h1", "a.h2", "a.h3"}
+
+def test_to_dict_includes_extra_entries_and_skipped_files(tmp_path):
+    g = write(tmp_path, {
+        "a.py": "from fastapi import Depends\ndef dep(): return 1\ndef view(x=Depends(dep)): return x\n",
+        "bad.py": "def (:\n",
+    })
+    assert g.to_dict()["extra_entry_points"] == ["a.dep"]
+    assert g.to_dict()["skipped_files"] == ["bad.py"]

@@ -6,7 +6,7 @@ SKIP_DIRS = {
     ".git", "__pycache__", ".venv", "venv", "node_modules",
     "site-packages", ".pytest_cache", "build", "dist",
 }
-ROUTE_ATTRS = {"get", "post", "put", "delete", "patch"}
+ROUTE_ATTRS = {"get", "post", "put", "delete", "patch", "head", "options", "trace", "websocket", "api_route"}
 HOOK_ATTRS = {
     "before_request", "after_request", "teardown_request",
     "teardown_appcontext", "before_first_request", "before_app_request",
@@ -14,9 +14,10 @@ HOOK_ATTRS = {
     "errorhandler", "app_errorhandler", "context_processor",
     "app_context_processor", "url_value_preprocessor", "url_defaults",
     "template_filter", "template_global", "template_test",
+    "middleware", "exception_handler",
 }
 CLASS_METHOD_ATTRS = {"get", "post", "put", "delete", "patch", "head", "options"}
-FACTORIES = {"Flask", "Blueprint"}
+FACTORIES = {"Flask", "Blueprint", "FastAPI", "APIRouter"}
 
 
 def module_name(root, path):
@@ -75,13 +76,31 @@ def _decorator_parts(dec):
     return None, None
 
 
+def _is_path_literal(node):
+    if isinstance(node, ast.Constant):
+        val = node.value
+        if isinstance(val, str):
+            return val == "" or val.startswith("/")
+    return False
+
+
 def _is_entry_decorator(dec, receivers):
     recv, attr = _decorator_parts(dec)
     if attr is None:
         return False
     if attr == "route":
         return True
-    return recv in receivers and (attr in ROUTE_ATTRS or attr in HOOK_ATTRS)
+    if attr in ROUTE_ATTRS:
+        if recv in receivers:
+            return True
+        if isinstance(dec, ast.Call):
+            if dec.args and _is_path_literal(dec.args[0]):
+                return True
+            for kw in dec.keywords:
+                if kw.arg == "path" and _is_path_literal(kw.value):
+                    return True
+        return False
+    return recv in receivers and attr in HOOK_ATTRS
 
 
 def _is_hook_decorator(dec):
@@ -175,6 +194,15 @@ def entry_points_in_file(tree, mod):
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "register_error_handler"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Name)
+            and node.args[1].id in defined_funcs
+        ):
+            found.add(f"{mod}.{node.args[1].id}")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_exception_handler"
             and len(node.args) >= 2
             and isinstance(node.args[1], ast.Name)
             and node.args[1].id in defined_funcs

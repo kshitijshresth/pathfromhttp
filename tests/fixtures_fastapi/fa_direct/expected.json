@@ -1,0 +1,1 @@
+{"target": "main.vuln", "entry_points": ["main.index"], "verdict": "REACHABLE", "path": ["main.index", "main.vuln"]}

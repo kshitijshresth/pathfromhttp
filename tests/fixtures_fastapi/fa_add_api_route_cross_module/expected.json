@@ -1,0 +1,1 @@
+{"target": "util.vuln", "entry_points": ["handlers.list_items"], "verdict": "REACHABLE", "path": ["handlers.list_items", "util.vuln"]}

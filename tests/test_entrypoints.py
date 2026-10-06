@@ -137,3 +137,79 @@ def test_no_syntax_warning_for_invalid_escape(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert find_entry_points(tmp_path) == []
+
+def test_fastapi_verbs_on_known_receivers(tmp_path):
+    write(tmp_path, "app.py", (
+        "from fastapi import FastAPI, APIRouter\n"
+        "app = FastAPI()\n"
+        "router = APIRouter()\n"
+        "\n"
+        "@app.get('/a')\n"
+        "def a(): return 1\n"
+        "\n"
+        "@router.post('')\n"
+        "def b(): return 1\n"
+        "\n"
+        "@router.head('/h')\n"
+        "def c(): return 1\n"
+        "\n"
+        "@router.options('/o')\n"
+        "async def d(): return 1\n"
+        "\n"
+        "@router.websocket('/ws')\n"
+        "async def e(ws): return 1\n"
+        "\n"
+        "@router.api_route('/x', methods=['GET'])\n"
+        "def f(): return 1\n"
+        "\n"
+        "def helper(): return 1\n"
+    ))
+    assert find_entry_points(tmp_path) == ["app.a", "app.b", "app.c", "app.d", "app.e", "app.f"]
+
+def test_verb_decorator_on_imported_receiver_needs_path_literal(tmp_path):
+    write(tmp_path, "main.py", "from fastapi import FastAPI\napp = FastAPI()\n")
+    write(tmp_path, "other.py", "class Thing:\n    def get(self, key): return None\ncache = Thing()\n")
+    write(tmp_path, "routes.py", (
+        "from main import app\n"
+        "from other import thing, cache\n"
+        "\n"
+        "@app.get('/x')\n"
+        "def a(): return 1\n"
+        "\n"
+        "@app.get('')\n"
+        "def b(): return 1\n"
+        "\n"
+        "@app.get(path='/c')\n"
+        "def c(): return 1\n"
+        "\n"
+        "@thing.get('key')\n"
+        "def d(): return 1\n"
+        "\n"
+        "@thing.get()\n"
+        "def e(): return 1\n"
+        "\n"
+        "@cache.post(some_var)\n"
+        "def f(): return 1\n"
+    ))
+    assert find_entry_points(tmp_path) == ["routes.a", "routes.b", "routes.c"]
+
+def test_middleware_and_exception_handler_hooks(tmp_path):
+    write(tmp_path, "app.py", (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "\n"
+        "@app.middleware('http')\n"
+        "async def mw(request, call_next): return 1\n"
+        "\n"
+        "@app.exception_handler(ValueError)\n"
+        "async def eh(request, exc): return 1\n"
+        "\n"
+        "def ke(request, exc): return 1\n"
+        "app.add_exception_handler(KeyError, ke)\n"
+        "\n"
+        "@app.on_event('startup')\n"
+        "def boot(): return 1\n"
+        "\n"
+        "def helper(): return 1\n"
+    ))
+    assert find_entry_points(tmp_path) == ["app.eh", "app.ke", "app.mw"]

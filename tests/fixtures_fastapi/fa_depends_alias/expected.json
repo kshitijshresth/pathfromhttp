@@ -1,0 +1,1 @@
+{"target": "deps.open_session", "entry_points": ["deps.get_db", "main.items"], "verdict": "REACHABLE", "path": ["deps.get_db", "deps.open_session"]}

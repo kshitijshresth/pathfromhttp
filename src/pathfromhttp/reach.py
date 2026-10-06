@@ -30,10 +30,16 @@ def _sites(graph, visited, table):
     return out
 
 
+def collect_entry_points(root, graph):
+    base = set(find_entry_points(root))
+    base.update(graph.extra_entries)
+    return sorted(e for e in base if e in graph.functions)
+
+
 def check_reachability(root, target):
     root = Path(root)
     graph = build_call_graph(root)
-    entries = sorted(e for e in find_entry_points(root) if e in graph.functions)
+    entries = collect_entry_points(root, graph)
     tgt = resolve_target(graph, target)
 
     parent = {e: None for e in entries}
@@ -96,6 +102,9 @@ def check_reachability(root, target):
                 )
             else:
                 verdict = "NOT_REACHABLE"
+        if verdict == "NOT_REACHABLE" and graph.skipped_files:
+            verdict = "UNKNOWN"
+            reason = f"{len(graph.skipped_files)} file(s) could not be parsed"
 
     final_visited = visited if verdict == "REACHABLE" else (visited2 if verdict == "LIKELY_REACHABLE" else (visited2 if verdict == "UNKNOWN" else visited))
     return {
@@ -110,6 +119,7 @@ def check_reachability(root, target):
         "unresolved": _sites(graph, final_visited, graph.unresolved),
         "ambiguous": _sites(graph, final_visited, graph.ambiguous),
         "approx_hops": approx_hops,
+        "skipped_files": graph.skipped_files,
     }
 
 
@@ -138,6 +148,10 @@ def render_text(result):
             f"{len(result['entry_points'])} entry point(s)."
         )
     if result["verdict"] not in ("REACHABLE", "LIKELY_REACHABLE"):
+        if result["skipped_files"]:
+            lines.append("Files that could not be parsed (not analyzed):")
+            for f in result["skipped_files"][:10]:
+                lines.append(f"  {f}")
         if result["unresolved"]:
             lines.append("Unresolved calls on the searched paths:")
             for u in result["unresolved"]:

@@ -1,0 +1,1 @@
+{"target": "auth.verify_token", "entry_points": ["auth.get_current_user", "main.me"], "verdict": "REACHABLE", "path": ["auth.get_current_user", "auth.verify_token"]}
