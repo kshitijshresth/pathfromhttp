@@ -51,22 +51,27 @@ Exit codes for `check`: 0 NOT_REACHABLE, 1 REACHABLE or LIKELY_REACHABLE, 2 UNKN
 
 ## What it recognizes
 
-Entry points (Python, Flask family):
+Entry points (Python, Flask and FastAPI families):
 
-- `@app.route`, `@bp.route`, and `get`/`post`/`put`/`delete`/`patch` shortcuts on Flask or Blueprint objects
-- `add_url_rule`, including `view_func=Cls.as_view(...)`
-- class-based handlers decorated with `X.route(...)` and `X.add_resource(Cls, ...)` (verb methods are the entry points)
-- request hooks such as `before_request`, `after_request`, `teardown_appcontext`, `errorhandler`, in decorator form and call form
+- Flask: `@app.route`, `@bp.route`, and `get`/`post`/`put`/`delete`/`patch` shortcuts on Flask or Blueprint objects
+- Flask: `add_url_rule`, including `view_func=Cls.as_view(...)`
+- Flask: class-based handlers decorated with `X.route(...)` and `X.add_resource(Cls, ...)` (verb methods are the entry points)
+- Flask: request hooks such as `before_request`, `after_request`, `teardown_appcontext`, `errorhandler`, in decorator form and call form
+- FastAPI: `@app.get`, `@app.post`, and other HTTP method decorators on FastAPI or APIRouter objects
+- FastAPI: `@app.websocket`, `@app.api_route`, and similar decorators
+- FastAPI: `@app.middleware` and `@app.exception_handler` for middleware and exception handlers
+- FastAPI: `Depends` and `Security` dependency injection (functions and classes passed as dependencies become entry points)
+- FastAPI: route registration calls like `app.add_api_route`, `router.add_api_websocket_route`, and constructor calls like `APIRoute`, `WebSocketRoute`
 
 Call graph: imports (absolute, relative, aliased, re-exported), methods and `self` calls, inheritance and overrides, `super()`, constructors, local and module-level instances, decorators and the functions they wrap, functions passed as callbacks. Test directories and test files are skipped.
 
 ## Evaluation
 
-Checked against 13 hand-verified targets in three open-source Flask apps (the Flask tutorial app, microblog, Flasky): 12 gave the correct answer (REACHABLE, LIKELY_REACHABLE or NOT_REACHABLE as appropriate), 1 returned UNKNOWN because its search path contains a genuinely dynamic call, and none were confidently wrong. This is a small sample and says little about other codebases.
+Checked against 13 hand-verified targets in three open-source Flask apps (the Flask tutorial app, microblog, Flasky): 12 gave the correct answer (REACHABLE, LIKELY_REACHABLE or NOT_REACHABLE as appropriate), 1 returned UNKNOWN because its search path contains a genuinely dynamic call, and none were confidently wrong. Also checked against the FastAPI full-stack template: dependency injection and route registration were correctly recognized. This is a small sample and says little about other codebases.
 
 ## Limitations
 
-- Python and the Flask family only. FastAPI and Django are not supported yet.
+- Python and the Flask and FastAPI families only. Django is not supported yet.
 - Static analysis only: routes registered at runtime, configuration, feature flags and reverse-proxy rules are not seen.
 - Calls through variables, reflection (`getattr`) and registries cannot be resolved and produce UNKNOWN when they are on the searched paths.
 - Dispatch that goes through data rather than calls (task queues referenced by name, signals, ORM event listeners) is not modeled.
@@ -74,6 +79,7 @@ Checked against 13 hand-verified targets in three open-source Flask apps (the Fl
 - A call on an untyped value whose method name is also a method name of a builtin type (`get`, `update`, `pop`, ...) is reported as ambiguous and does not block NOT_REACHABLE, so NOT_REACHABLE results list those calls as reduced confidence.
 - Class-based handlers are only detected when the registration is in the same file as the class.
 - Module-level code that runs at import time is ignored.
+- Dependency injection (FastAPI `Depends` and `Security`) is recognized only when the dependency is a project function or class; calls through external dependencies are ignored.
 
 ## Development
 
