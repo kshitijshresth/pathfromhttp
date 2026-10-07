@@ -22,6 +22,7 @@ class CallGraph:
         self.approx = {}
         self.extra_entries = set()
         self.skipped_files = []
+        self.spans = {}
 
     def to_dict(self):
         def calls(d):
@@ -38,6 +39,7 @@ class CallGraph:
             "approx_edges": {k: sorted(v) for k, v in sorted(self.approx.items()) if v},
             "extra_entry_points": sorted(self.extra_entries),
             "skipped_files": self.skipped_files,
+            "spans": dict(sorted(self.spans.items())),
         }
 
 
@@ -123,15 +125,27 @@ class _Builder:
             mi = _ModuleInfo(name, tree, py.name == "__init__.py", rel)
             for n in tree.body:
                 if isinstance(n, FUNC_NODES):
-                    mi.funcs[n.name] = (f"{name}.{n.name}", n)
+                    qname = f"{name}.{n.name}"
+                    mi.funcs[n.name] = (qname, n)
                     self.all_names.add(n.name)
+                    start = n.lineno
+                    for dec in n.decorator_list:
+                        if dec.lineno < start:
+                            start = dec.lineno
+                    self.graph.spans[qname] = {"file": rel, "start": start, "end": n.end_lineno}
                 elif isinstance(n, ast.ClassDef):
                     ci = _ClassInfo(f"{name}.{n.name}", name, n)
                     for m in n.body:
                         if isinstance(m, FUNC_NODES):
-                            ci.methods[m.name] = f"{ci.qname}.{m.name}"
+                            mqname = f"{ci.qname}.{m.name}"
+                            ci.methods[m.name] = mqname
                             self.all_methods.add(m.name)
                             self.all_names.add(m.name)
+                            start = m.lineno
+                            for dec in m.decorator_list:
+                                if dec.lineno < start:
+                                    start = dec.lineno
+                            self.graph.spans[mqname] = {"file": rel, "start": start, "end": m.end_lineno}
                     mi.classes[n.name] = ci
                     self.classes[ci.qname] = ci
                     self.all_names.add(n.name)
