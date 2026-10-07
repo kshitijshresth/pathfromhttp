@@ -1,0 +1,6 @@
+{
+  "results": [
+    {"rule_id": "py/unsafe-dispatch", "file": "handlers.py", "line": 2, "function": "handlers.report", "verdict": "UNKNOWN", "path": null}
+  ],
+  "summary": {"total": 1, "REACHABLE": 0, "LIKELY_REACHABLE": 0, "NOT_REACHABLE": 0, "UNKNOWN": 1, "UNLOCATED": 0}
+}

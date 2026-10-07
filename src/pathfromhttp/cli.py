@@ -7,6 +7,7 @@ from pathfromhttp.callgraph import build_call_graph
 from pathfromhttp.entrypoints import find_entry_points
 from pathfromhttp.locate import locate
 from pathfromhttp.reach import TargetError, check_reachability, collect_entry_points, render_text
+from pathfromhttp.triage import triage, SarifError, render_triage_text
 
 EXIT_CODES = {"NOT_REACHABLE": 0, "REACHABLE": 1, "LIKELY_REACHABLE": 1, "UNKNOWN": 2}
 
@@ -30,6 +31,11 @@ def main(argv=None):
     l.add_argument("repo")
     l.add_argument("location")
     l.add_argument("--json", action="store_true")
+    t = sub.add_parser("triage", help="reachability verdicts for the findings in a SARIF file")
+    t.add_argument("repo")
+    t.add_argument("sarif")
+    t.add_argument("--json", action="store_true")
+    t.add_argument("--fail-on-reachable", action="store_true")
     args = p.parse_args(argv)
 
     root = Path(args.repo)
@@ -75,6 +81,17 @@ def main(argv=None):
             else:
                 print(f"no function contains {args.location}", file=sys.stderr)
         return 0 if qname else 1
+    if args.cmd == "triage":
+        try:
+            result = triage(root, args.sarif)
+        except SarifError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 3
+        print(json.dumps(result, indent=2) if args.json else render_triage_text(result))
+        if args.fail_on_reachable:
+            has_reachable = any(r["verdict"] in ("REACHABLE", "LIKELY_REACHABLE") for r in result["results"])
+            return 1 if has_reachable else 0
+        return 0
     try:
         result = check_reachability(root, args.target)
     except TargetError as exc:

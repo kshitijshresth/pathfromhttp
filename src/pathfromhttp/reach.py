@@ -36,54 +36,78 @@ def collect_entry_points(root, graph):
     return sorted(e for e in base if e in graph.functions)
 
 
-def check_reachability(root, target):
+def analyze(root):
     root = Path(root)
     graph = build_call_graph(root)
     entries = collect_entry_points(root, graph)
-    tgt = resolve_target(graph, target)
 
-    parent = {e: None for e in entries}
+    parent_precise = {e: None for e in entries}
     queue = deque(entries)
     while queue:
         fn = queue.popleft()
         for callee in sorted(graph.edges.get(fn, ())):
-            if callee not in parent:
-                parent[callee] = fn
+            if callee not in parent_precise:
+                parent_precise[callee] = fn
                 queue.append(callee)
-    visited = set(parent)
+    visited_precise = set(parent_precise)
+
+    parent_loose = {e: None for e in entries}
+    queue = deque(entries)
+    while queue:
+        fn = queue.popleft()
+        for callee in sorted(graph.edges.get(fn, ())):
+            if callee not in parent_loose:
+                parent_loose[callee] = fn
+                queue.append(callee)
+        for callee in sorted(graph.approx.get(fn, ())):
+            if callee not in parent_loose:
+                parent_loose[callee] = fn
+                queue.append(callee)
+    visited_loose = set(parent_loose)
+
+    return {
+        "graph": graph,
+        "entries": entries,
+        "parent_precise": parent_precise,
+        "parent_loose": parent_loose,
+        "visited": visited_precise,
+        "visited_loose": visited_loose,
+        "unresolved": _sites(graph, visited_loose, graph.unresolved),
+        "ambiguous": _sites(graph, visited_loose, graph.ambiguous),
+        "skipped_files": graph.skipped_files,
+    }
+
+
+def verdict_for(analysis, target):
+    graph = analysis["graph"]
+    entries = analysis["entries"]
+    parent_precise = analysis["parent_precise"]
+    parent_loose = analysis["parent_loose"]
+    visited_precise = analysis["visited"]
+    visited_loose = analysis["visited_loose"]
+    unresolved = analysis["unresolved"]
+    ambiguous = analysis["ambiguous"]
+    skipped_files = analysis["skipped_files"]
 
     path = None
     reason = None
     approx_hops = []
-    if tgt in parent:
+    if target in parent_precise:
         verdict = "REACHABLE"
         path = []
-        cur = tgt
+        cur = target
         while cur is not None:
             path.append(cur)
-            cur = parent[cur]
+            cur = parent_precise[cur]
         path.reverse()
     else:
-        parent2 = {e: None for e in entries}
-        queue = deque(entries)
-        while queue:
-            fn = queue.popleft()
-            for callee in sorted(graph.edges.get(fn, ())):
-                if callee not in parent2:
-                    parent2[callee] = fn
-                    queue.append(callee)
-            for callee in sorted(graph.approx.get(fn, ())):
-                if callee not in parent2:
-                    parent2[callee] = fn
-                    queue.append(callee)
-        visited2 = set(parent2)
-        if tgt in parent2:
+        if target in parent_loose:
             verdict = "LIKELY_REACHABLE"
             path = []
-            cur = tgt
+            cur = target
             while cur is not None:
                 path.append(cur)
-                cur = parent2[cur]
+                cur = parent_loose[cur]
             path.reverse()
             for i in range(len(path) - 1):
                 if path[i+1] not in graph.edges.get(path[i], set()):
@@ -94,7 +118,6 @@ def check_reachability(root, target):
             verdict = "UNKNOWN"
             reason = "no HTTP entry points were detected"
         else:
-            unresolved = _sites(graph, visited2, graph.unresolved)
             if unresolved:
                 verdict = "UNKNOWN"
                 reason = (
@@ -102,14 +125,14 @@ def check_reachability(root, target):
                 )
             else:
                 verdict = "NOT_REACHABLE"
-        if verdict == "NOT_REACHABLE" and graph.skipped_files:
+        if verdict == "NOT_REACHABLE" and skipped_files:
             verdict = "UNKNOWN"
-            reason = f"{len(graph.skipped_files)} file(s) could not be parsed"
+            reason = f"{len(skipped_files)} file(s) could not be parsed"
 
-    final_visited = visited if verdict == "REACHABLE" else (visited2 if verdict == "LIKELY_REACHABLE" else (visited2 if verdict == "UNKNOWN" else visited))
+    final_visited = visited_precise if verdict == "REACHABLE" else (visited_loose if verdict == "LIKELY_REACHABLE" else (visited_loose if verdict == "UNKNOWN" else visited_precise))
     return {
-        "target": tgt,
-        "target_location": graph.functions[tgt],
+        "target": target,
+        "target_location": graph.functions[target],
         "verdict": verdict,
         "reason": reason,
         "path": path,
@@ -119,8 +142,14 @@ def check_reachability(root, target):
         "unresolved": _sites(graph, final_visited, graph.unresolved),
         "ambiguous": _sites(graph, final_visited, graph.ambiguous),
         "approx_hops": approx_hops,
-        "skipped_files": graph.skipped_files,
+        "skipped_files": skipped_files,
     }
+
+
+def check_reachability(root, target):
+    analysis = analyze(root)
+    tgt = resolve_target(analysis["graph"], target)
+    return verdict_for(analysis, tgt)
 
 
 def render_text(result):

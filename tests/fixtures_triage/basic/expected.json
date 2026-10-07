@@ -1,0 +1,11 @@
+{
+  "results": [
+    {"rule_id": "py/sql-injection", "file": "db.py", "line": 2, "function": "db.run_query", "verdict": "REACHABLE", "path": ["app.users", "db.run_query"]},
+    {"rule_id": "py/sql-injection", "file": "db.py", "line": 7, "function": "db.execute", "verdict": "REACHABLE", "path": ["app.users", "db.run_query", "db.execute"]},
+    {"rule_id": "py/unsafe-render", "file": "reports.py", "line": 3, "function": "reports.Report.render", "verdict": "LIKELY_REACHABLE", "path": ["app.export", "reports.Report.render"]},
+    {"rule_id": "py/dead-helper", "file": "legacy.py", "line": 2, "function": "legacy.cleanup", "verdict": "NOT_REACHABLE", "path": null},
+    {"rule_id": "py/hardcoded-secret", "file": "app.py", "line": 7, "function": null, "verdict": "UNLOCATED", "path": null},
+    {"rule_id": "py/outdated-dependency", "file": "requirements.txt", "line": 3, "function": null, "verdict": "UNLOCATED", "path": null}
+  ],
+  "summary": {"total": 6, "REACHABLE": 2, "LIKELY_REACHABLE": 1, "NOT_REACHABLE": 1, "UNKNOWN": 0, "UNLOCATED": 2}
+}

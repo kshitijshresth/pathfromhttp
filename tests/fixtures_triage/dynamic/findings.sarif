@@ -1,0 +1,11 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {"driver": {"name": "example-scanner"}},
+      "results": [
+        {"ruleId": "py/unsafe-dispatch", "level": "warning", "message": {"text": "Handler lookup by name"}, "locations": [{"physicalLocation": {"artifactLocation": {"uri": "handlers.py"}, "region": {"startLine": 2}}}]}
+      ]
+    }
+  ]
+}
